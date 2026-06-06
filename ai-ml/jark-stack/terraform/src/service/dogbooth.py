@@ -18,7 +18,9 @@ def validate_prompt(prompt: str) -> None:
     assert len(prompt), "prompt parameter cannot be empty"
 
 
-@serve.deployment(num_replicas=1, route_prefix="/")
+# route_prefix is set at the application level (serveConfigV2), not on the
+# deployment — Ray Serve >= 2.9 removed route_prefix from @serve.deployment.
+@serve.deployment(num_replicas=1)
 @serve.ingress(app)
 class APIIngress:
     def __init__(self, diffusion_model_handle) -> None:

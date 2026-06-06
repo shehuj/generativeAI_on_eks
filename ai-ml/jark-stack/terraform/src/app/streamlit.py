@@ -5,8 +5,9 @@ from PIL import Image
 import tempfile
 
 
-### Update Hostname before building image
-base_url = ""
+### Ray Serve dogbooth endpoint (in-cluster). The Streamlit pod calls this
+### server-side; KubeRay exposes the serve app on <rayservice>-serve-svc:8000.
+base_url = "http://dogbooth-serve-svc.dogbooth.svc.cluster.local:8000/imagine"
 
 
 def build_image_url(base_url: str, prompt: str) -> str:
