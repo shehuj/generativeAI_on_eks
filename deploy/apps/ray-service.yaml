@@ -42,12 +42,16 @@ spec:
               ports:
                 - containerPort: 6379
                   name: gcs-server
+                  protocol: TCP
                 - containerPort: 8265
                   name: dashboard
+                  protocol: TCP
                 - containerPort: 10001
                   name: client
+                  protocol: TCP
                 - containerPort: 8000
                   name: serve
+                  protocol: TCP
     workerGroupSpecs:
       - replicas: 1
         minReplicas: 1
