@@ -53,8 +53,11 @@ spec:
                   name: serve
                   protocol: TCP
     workerGroupSpecs:
-      - replicas: 1
-        minReplicas: 1
+      # Worker scaled to 0 and CPU-only: the single-replica Stable Diffusion model
+      # (1 GPU) runs on the head's GPU. This keeps each Ray cluster at 1 GPU so a
+      # KubeRay zero-downtime upgrade (old + new clusters) fits the 2 GPU nodes.
+      - replicas: 0
+        minReplicas: 0
         maxReplicas: 5
         rayStartParams: {}
         groupName: small-group
@@ -71,11 +74,9 @@ spec:
                   limits:
                     cpu: "2"
                     memory: "16Gi"
-                    nvidia.com/gpu: 1
                   requests:
                     cpu: "2"
                     memory: "16Gi"
-                    nvidia.com/gpu: 1
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
