@@ -3,10 +3,9 @@ name: Infra
 # Reusable infrastructure pipeline — provisions the JARK stack EKS platform
 # with Terraform (ai-ml/jark-stack/terraform).
 #
-# Configuration is read from a single AWS Secrets Manager secret (JSON) at
-# runtime — see .github/workflows/README.md. The only GitHub-side config needed
-# is the OIDC role (secrets.AWS_ROLE_ARN); the bootstrap region defaults to
-# us-west-2 and can be overridden with vars.AWS_REGION.
+# Configuration is read from GitHub Actions secrets. Required: AWS_ROLE_ARN.
+# Optional: AWS_REGION (defaults us-west-2), HUGGINGFACE_TOKEN, TF_STATE_BUCKET,
+# TF_STATE_KEY, TF_STATE_REGION, TF_LOCK_TABLE.
 
 on:
   workflow_call:
@@ -27,7 +26,6 @@ on:
     paths:
       - "ai-ml/jark-stack/terraform/**"
       - ".github/workflows/infra.yml"
-      - ".github/actions/aws-config/**"
 
 permissions:
   contents: read
@@ -40,9 +38,6 @@ concurrency:
 env:
   TF_DIR: ai-ml/jark-stack/terraform
   TF_VERSION: "1.9.8"
-  # Bootstrap region used to assume the role and read Secrets Manager. The secret
-  # may carry its own AWS_REGION which then takes over for Terraform/EKS.
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
 
 jobs:
   terraform:
@@ -54,25 +49,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Preflight — OIDC role present
+      # Map secrets into the job env so later steps can use shell vars and `if:`
+      # conditions (secrets can't be referenced directly in `if:`). AWS_REGION
+      # falls back to us-west-2 when the secret is not set.
+      - name: Load config from GitHub secrets
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ secrets.TF_STATE_KEY }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+          TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
         run: |
           [ -z "$AWS_ROLE_ARN" ] && { echo "::error::secrets.AWS_ROLE_ARN is required"; exit 1; }
-          echo "Preflight OK (region: ${AWS_REGION})"
+          for v in AWS_REGION HUGGINGFACE_TOKEN TF_STATE_BUCKET TF_STATE_KEY TF_STATE_REGION TF_LOCK_TABLE; do
+            val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-west-2" >> "$GITHUB_ENV"
+          echo "Config loaded from GitHub secrets"
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      # Assume the role and load HUGGINGFACE_TOKEN, TF_STATE_*, EKS_CLUSTER_NAME,
-      # AWS_REGION, etc. from Secrets Manager into the job environment.
-      - name: AWS auth + load config
-        uses: ./.github/actions/aws-config
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          region: ${{ env.AWS_REGION }}
-          secret-id: ${{ vars.CONFIG_SECRET_ID || 'jark-stack/config' }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: terraform fmt -check
         working-directory: ${{ env.TF_DIR }}
@@ -98,7 +103,7 @@ jobs:
               -backend-config="region=${TF_STATE_REGION:-$AWS_REGION}" \
               ${TF_LOCK_TABLE:+-backend-config=dynamodb_table=$TF_LOCK_TABLE}
           else
-            echo "::warning::No TF_STATE_BUCKET in the config secret — using ephemeral local state (fine for plan, NOT for apply)."
+            echo "::warning::No TF_STATE_BUCKET secret — using ephemeral local state (fine for plan, NOT for apply)."
             terraform init -input=false -upgrade
           fi
 

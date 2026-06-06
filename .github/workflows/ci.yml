@@ -24,12 +24,10 @@ on:
     paths:
       - "ai-ml/jark-stack/**"
       - ".github/workflows/ci.yml"
-      - ".github/actions/aws-config/**"
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write # OIDC: build-images reads Docker Hub creds from AWS Secrets Manager
+  contents: read # Docker Hub creds come from GitHub secrets; no AWS/OIDC needed
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -124,27 +122,26 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Docker Hub creds come from AWS Secrets Manager. Push is best-effort: if no
-      # OIDC role is configured (e.g. fork PRs) or the secret can't be read, the
-      # image is built to cache only and the job still succeeds.
-      - name: Detect AWS availability
-        id: pre
+      # Docker Hub creds come from GitHub secrets. Push is best-effort: if creds
+      # aren't set (e.g. fork PRs), the image builds to cache only and the job
+      # still succeeds — so lint/test/build keep working on PRs.
+      - name: Resolve Docker Hub creds
+        id: dh
         env:
-          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          if [ -n "$AWS_ROLE_ARN" ]; then echo "aws=true" >> "$GITHUB_OUTPUT"; else echo "aws=false" >> "$GITHUB_OUTPUT"; fi
-
-      - name: AWS auth + load Docker Hub creds
-        if: steps.pre.outputs.aws == 'true'
-        continue-on-error: true
-        uses: ./.github/actions/aws-config
-        with:
-          role-arn: ${{ secrets.AWS_ROLE_ARN }}
-          region: ${{ vars.AWS_REGION || 'us-west-2' }}
-          secret-id: ${{ vars.CONFIG_SECRET_ID || 'jark-stack/config' }}
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME" >> "$GITHUB_ENV"
+            echo "DOCKERHUB_TOKEN=$DOCKERHUB_TOKEN" >> "$GITHUB_ENV"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Docker Hub creds not set — building without pushing."
+          fi
 
       - name: Login to Docker Hub
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: steps.dh.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
@@ -154,9 +151,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.image.context }}
-          push: ${{ env.DOCKERHUB_USERNAME != '' }}
+          push: ${{ steps.dh.outputs.push == 'true' }}
           tags: >-
-            ${{ env.DOCKERHUB_USERNAME != ''
+            ${{ steps.dh.outputs.push == 'true'
               && format('docker.io/{0}/{1}:{2}', env.DOCKERHUB_USERNAME, matrix.image.name, steps.meta.outputs.tag)
               || format('{0}:{1}', matrix.image.name, steps.meta.outputs.tag) }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
