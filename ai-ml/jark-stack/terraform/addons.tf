@@ -65,6 +65,10 @@ module "eks_blueprints_addons" {
   cluster_version   = module.eks.cluster_version
   oidc_provider_arn = module.eks.oidc_provider_arn
 
+  # Disable the optional usage-telemetry CloudFormation stack (avoids needing
+  # cloudformation:CreateStack; it only reports anonymous usage to AWS).
+  observability_tag = null
+
   #---------------------------------------
   # Amazon EKS Managed Add-ons
   #---------------------------------------
