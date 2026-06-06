@@ -146,6 +146,17 @@ module "eks_blueprints_addons" {
   }
 
   #---------------------------------------
+  # Argo CD (GitOps continuous delivery)
+  #---------------------------------------
+  enable_argocd = true
+  argocd = {
+    name       = "argo-cd"
+    namespace  = "argocd"
+    repository = "https://argoproj.github.io/argo-helm"
+    values     = [templatefile("${path.module}/helm-values/argocd-values.yaml", {})]
+  }
+
+  #---------------------------------------
   # Prommetheus and Grafana stack
   #---------------------------------------
   #---------------------------------------------------------------

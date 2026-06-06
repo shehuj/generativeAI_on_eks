@@ -21,6 +21,11 @@ spec:
       labels:
         app: streamlit
     spec:
+      # Pull secret for the private Docker Hub app image. The pipeline creates
+      # the `dockerhub` secret in this namespace before sync. (Harmless when the
+      # upstream public image is used — kubelet falls back to anonymous pull.)
+      imagePullSecrets:
+        - name: dockerhub
       containers:
         - name: streamlit
           image: public.ecr.aws/h3o5n2r0/gen-ai-demo/dogbooth-app:0.0.2
@@ -72,12 +77,12 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  - http:
-      paths:
-        - path: /dogbooth/app/(.*)
-          pathType: ImplementationSpecific
-          backend:
-            service:
-              name: streamlit-service
-              port:
-                number: 8501
+    - http:
+        paths:
+          - path: /dogbooth/app/(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: streamlit-service
+                port:
+                  number: 8501

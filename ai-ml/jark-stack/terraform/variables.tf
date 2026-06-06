@@ -58,3 +58,24 @@ variable "bottlerocket_data_disk_snpashot_id" {
   default     = null
 
 }
+
+#---------------------------------------------------------------
+# GitOps (Argo CD Application) settings
+#---------------------------------------------------------------
+variable "gitops_repo_url" {
+  description = "Git repository Argo CD syncs the app manifests from"
+  type        = string
+  default     = "https://github.com/shehuj/generativeAI_on_eks"
+}
+
+variable "gitops_target_revision" {
+  description = "Git branch/tag Argo CD tracks"
+  type        = string
+  default     = "main"
+}
+
+variable "gitops_path" {
+  description = "Path within the repo holding the Kustomize app manifests"
+  type        = string
+  default     = "deploy/apps"
+}

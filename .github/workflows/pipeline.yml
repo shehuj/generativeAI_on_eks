@@ -1,0 +1,435 @@
+name: Pipeline
+
+# Single CI/CD pipeline for the JARK stack.
+#
+#   PR:    quality scans + build (no push) + image/IaC scans            (no infra, no deploy)
+#   main:  scans -> build & push app image ─┐
+#                                           ├─ validate infra ready -> deploy (Argo CD GitOps)
+#          iac scan -> terraform apply ─────┘        -> deployment validation -> summary
+#
+# Deployment is GitOps: the pipeline bumps the app image tag in deploy/apps and
+# Argo CD (installed by Terraform) syncs it. See .github/workflows/README.md.
+
+on:
+  pull_request:
+    paths:
+      - "ai-ml/jark-stack/**"
+      - "deploy/**"
+      - ".github/workflows/pipeline.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ai-ml/jark-stack/**"
+      - "deploy/apps/**"
+      - ".github/workflows/pipeline.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # GitOps image-tag commit
+  id-token: write # AWS OIDC
+  security-events: write # SARIF upload to the Security tab
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_DIR: ai-ml/jark-stack/terraform
+  TF_VERSION: "1.9.8"
+  APP_CONTEXT: ai-ml/jark-stack/terraform/src/app
+  GITOPS_DIR: deploy/apps
+  UPSTREAM_APP_IMAGE: public.ecr.aws/h3o5n2r0/gen-ai-demo/dogbooth-app
+
+jobs:
+  # ============================ Code Quality Scan ============================
+  validate-secrets:
+    name: Validate secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required secrets are available
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          missing=()
+          for v in AWS_ROLE_ARN EKS_CLUSTER_NAME DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            [ -z "${!v}" ] && missing+=("$v")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            if [ "$IS_MAIN" = "true" ]; then
+              echo "::error::Missing required secrets: ${missing[*]}"; exit 1
+            fi
+            echo "::warning::Missing secrets (acceptable on PR / forks): ${missing[*]}"
+          fi
+          echo "Secret availability check complete."
+
+  lint-test:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+          [ -f tests/requirements.txt ] && pip install -r tests/requirements.txt || true
+      - name: flake8
+        run: |
+          flake8 ai-ml/jark-stack/terraform/src tests --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 ai-ml/jark-stack/terraform/src tests --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      - name: pytest
+        run: pytest
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: terraform fmt & validate
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform fmt -check
+          terraform init -backend=false -input=false
+          terraform validate
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        # Report-only (uploads to the Security tab). Add `--error` to gate the build.
+        run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  repo-scan:
+    name: SCA & secrets (Trivy fs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: "0" # report-only; set to "1" to fail on findings
+          skip-dirs: .terraform,website,node_modules
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  iac-scan:
+    name: IaC scan (tfsec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tfsec
+        uses: aquasecurity/tfsec-sarif-action@v0.1.4
+        with:
+          working_directory: ${{ env.TF_DIR }}
+          sarif_file: tfsec.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec.sarif
+          category: tfsec
+
+  # ===================== Build Application (+ container scan) =================
+  build-app:
+    name: Build & scan app image
+    runs-on: ubuntu-latest
+    needs: [validate-secrets, lint-test, sast, repo-scan, iac-scan]
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      image: ${{ steps.meta.outputs.image }}
+      pushed: ${{ steps.meta.outputs.pushed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute image metadata
+        id: meta
+        env:
+          DU: ${{ secrets.DOCKERHUB_USERNAME }}
+          DT: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_SHA}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ -n "$DU" ]; then IMG="docker.io/$DU/dogbooth-app:$TAG"; else IMG="dogbooth-app:$TAG"; fi
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && [ -n "$DU" ] && [ -n "$DT" ]; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (load locally)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_CONTEXT }}
+          load: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Container scan (Trivy image)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "0" # report-only; set to "1" to fail on findings
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      - name: Push image (main only)
+        if: steps.meta.outputs.pushed == 'true'
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+          docker push "${{ steps.meta.outputs.image }}"
+
+  # ============================ Build Infra (gated) ==========================
+  infra:
+    name: Terraform apply
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [validate-secrets, lint-test, iac-scan]
+    environment: production # approval gate before any prod infra change
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load config from secrets
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ secrets.TF_STATE_KEY }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+          TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
+        run: |
+          for v in AWS_REGION HUGGINGFACE_TOKEN TF_STATE_BUCKET TF_STATE_KEY TF_STATE_REGION TF_LOCK_TABLE; do
+            val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-east-1" >> "$GITHUB_ENV"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          if [ -n "${TF_STATE_BUCKET:-}" ]; then
+            cat > backend_ci_override.tf <<'EOF'
+          terraform {
+            backend "s3" {}
+          }
+          EOF
+            terraform init -input=false -upgrade \
+              -backend-config="bucket=${TF_STATE_BUCKET}" \
+              -backend-config="key=${TF_STATE_KEY:-jark-stack/terraform.tfstate}" \
+              -backend-config="region=${TF_STATE_REGION:-$AWS_REGION}" \
+              ${TF_LOCK_TABLE:+-backend-config=dynamodb_table=$TF_LOCK_TABLE}
+          else
+            echo "::warning::No TF_STATE_BUCKET — ephemeral local state."
+            terraform init -input=false -upgrade
+          fi
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_huggingface_token: ${{ env.HUGGINGFACE_TOKEN }}
+          TF_VAR_region: ${{ env.AWS_REGION }}
+        run: terraform apply -input=false -auto-approve
+
+  # ========================= Validate Infra Ready ============================
+  validate-infra:
+    name: Validate infra ready
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [infra, build-app]
+    steps:
+      - name: Load config
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+        run: |
+          echo "AWS_REGION=${AWS_REGION:-us-east-1}" >> "$GITHUB_ENV"
+          echo "EKS_CLUSTER_NAME=${EKS_CLUSTER_NAME}" >> "$GITHUB_ENV"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+      - name: Check cluster + Argo CD present
+        run: |
+          set -euo pipefail
+          status=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.status' --output text)
+          echo "Cluster status: $status"; [ "$status" = "ACTIVE" ]
+          aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl get namespace argocd
+          kubectl -n argocd wait --for=condition=available deploy --all --timeout=300s
+          kubectl -n argocd get application dogbooth
+
+  # ============================ Deploy (Argo CD) =============================
+  deploy:
+    name: Deploy (Argo CD GitOps)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [validate-infra]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Load config
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          echo "AWS_REGION=${AWS_REGION:-us-east-1}" >> "$GITHUB_ENV"
+          echo "EKS_CLUSTER_NAME=${EKS_CLUSTER_NAME}" >> "$GITHUB_ENV"
+          echo "DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}" >> "$GITHUB_ENV"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+      - name: Ensure Docker Hub pull secret (private app image)
+        if: needs.build-app.outputs.pushed == 'true'
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          kubectl create namespace dogbooth-app --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n dogbooth-app create secret docker-registry dockerhub \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username="$DOCKERHUB_USERNAME" \
+            --docker-password="$DOCKERHUB_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - name: Install kustomize
+        run: |
+          curl -sfLo /tmp/kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
+          kustomize version
+      - name: Bump image tag (GitOps) and commit
+        if: needs.build-app.outputs.pushed == 'true'
+        run: |
+          set -euo pipefail
+          cd "$GITOPS_DIR"
+          kustomize edit set image "${UPSTREAM_APP_IMAGE}=${{ needs.build-app.outputs.image }}"
+          cd - >/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- "$GITOPS_DIR/kustomization.yaml"; then
+            git add "$GITOPS_DIR/kustomization.yaml"
+            git commit -m "deploy: dogbooth-app ${{ needs.build-app.outputs.tag }} [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "No image change to commit."
+          fi
+      - name: Trigger Argo CD sync and wait for healthy
+        run: |
+          set -euo pipefail
+          # Force a refresh so Argo CD picks up the new commit immediately.
+          kubectl -n argocd annotate application dogbooth argocd.argoproj.io/refresh=hard --overwrite || true
+          echo "Waiting for Argo CD Application to be Synced + Healthy…"
+          for i in $(seq 1 40); do
+            sync=$(kubectl -n argocd get application dogbooth -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+            health=$(kubectl -n argocd get application dogbooth -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+            echo "[$i] sync=$sync health=$health"
+            [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && { echo "Argo CD app healthy."; exit 0; }
+            sleep 15
+          done
+          echo "::warning::Argo CD app not Synced/Healthy within timeout — continuing to validation for diagnostics"
+
+  # ======================= Deployment Validation =============================
+  deploy-validation:
+    name: Deployment validation
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy]
+    steps:
+      - name: Load config
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+        run: |
+          echo "AWS_REGION=${AWS_REGION:-us-east-1}" >> "$GITHUB_ENV"
+          echo "EKS_CLUSTER_NAME=${EKS_CLUSTER_NAME}" >> "$GITHUB_ENV"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+      - name: Validate rollout + smoke test
+        run: |
+          set -uo pipefail
+          aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+          ok=0
+          if kubectl -n dogbooth-app rollout status deployment/streamlit-deployment --timeout=600s; then
+            echo "Streamlit rollout complete."
+          else
+            echo "::error::Streamlit rollout failed"; ok=1
+            kubectl -n dogbooth-app get pods -o wide || true
+            kubectl -n dogbooth-app describe deploy/streamlit-deployment 2>&1 | tail -30 || true
+          fi
+          echo "RayService status:"; kubectl -n dogbooth get rayservice dogbooth -o wide || true
+          echo "Smoke test: Streamlit health endpoint"
+          kubectl -n dogbooth-app run smoke-$RANDOM --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+            curl -sf --max-time 10 http://streamlit-service.dogbooth-app.svc.cluster.local:8501/_stcore/health \
+            && echo "Smoke test PASSED" || { echo "::warning::Smoke test did not pass (app may still be warming up)"; }
+          exit $ok
+
+  # ============================ Monitoring & Alerts ==========================
+  monitoring:
+    name: Summary & alerts
+    runs-on: ubuntu-latest
+    if: ${{ always() && github.ref == 'refs/heads/main' }}
+    needs: [build-app, infra, validate-infra, deploy, deploy-validation]
+    steps:
+      - name: Write run summary
+        run: |
+          {
+            echo "## JARK stack deployment"
+            echo ""
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Build & scan image | ${{ needs.build-app.result }} |"
+            echo "| Terraform apply | ${{ needs.infra.result }} |"
+            echo "| Validate infra | ${{ needs.validate-infra.result }} |"
+            echo "| Argo CD deploy | ${{ needs.deploy.result }} |"
+            echo "| Deployment validation | ${{ needs.deploy-validation.result }} |"
+            echo ""
+            echo "**App image:** \`${{ needs.build-app.outputs.image }}\` (pushed: ${{ needs.build-app.outputs.pushed }})"
+            echo "**Ray service:** upstream public image (unchanged)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if a critical stage failed
+        run: |
+          for r in "${{ needs.build-app.result }}" "${{ needs.infra.result }}" "${{ needs.validate-infra.result }}" "${{ needs.deploy.result }}" "${{ needs.deploy-validation.result }}"; do
+            [ "$r" = "failure" ] && { echo "::error::A pipeline stage failed"; exit 1; }
+          done
+          echo "Pipeline succeeded."

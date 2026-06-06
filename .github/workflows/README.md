@@ -1,99 +1,80 @@
-# CI/CD for the JARK stack
+# JARK stack CI/CD
 
-Three independent pipelines, composed by one orchestrator.
-
-| Workflow | File | Purpose | Runs on |
-| --- | --- | --- | --- |
-| **Deploy** (orchestrator) | `deploy.yml` | Runs `infra` + `ci` in parallel, then `cd` once **both** succeed | push to `main` (paths: `ai-ml/jark-stack/**`), manual |
-| **Infra** | `infra.yml` | Terraform `plan`/`apply`/`destroy` for the EKS platform | PR (plan), called by `deploy`, manual |
-| **CI** | `ci.yml` | Python lint/test, Terraform fmt/validate, build & push app images | PR, called by `deploy`, manual |
-| **CD** | `cd.yml` | Deploy `dogbooth` RayService + Streamlit app to EKS | called by `deploy`, manual |
+One pipeline (`pipeline.yml`) takes a change from PR → production, with security
+scanning throughout and **GitOps delivery via Argo CD**.
 
 ```
-infra ─┐
-       ├─► cd      (cd needs: [infra, ci])
-ci ────┘
+PR:    validate-secrets ┐
+       lint-test        ├─ build & scan app image (no push)     (no infra, no deploy)
+       SAST (Semgrep)   │
+       SCA/secrets ─────┤
+       IaC (tfsec) ─────┘
+
+main:  ┌ scans ─────────────► build & scan & push app image ─┐
+       └ iac-scan ► terraform apply (gated) ─────────────────┼─► validate infra ready
+                                                             ┘          │
+                                          deploy via Argo CD (GitOps)  ◄┘
+                                                     │
+                                          deployment validation (rollout + smoke test)
+                                                     │
+                                              summary & alerts → END
 ```
 
-`infra` and `ci` have no dependency on each other, so they run concurrently. `cd`
-declares `needs: [infra, ci]`, so it only starts after both finish — and its `if`
-guard requires both to have *succeeded* (never on failure/cancel).
+## Stages (jobs)
 
-Each pipeline is also a normal reusable/standalone workflow, so you can run any of
-them on their own (e.g. `infra` with `action: plan` on a PR, or `cd` via
-**Run workflow** to roll out a specific image tag).
+| Job | When | Purpose |
+| --- | --- | --- |
+| `validate-secrets` | PR (warn) / main (fail) | Required secrets present |
+| `lint-test` | PR + main | flake8, pytest, `terraform fmt`/`validate` |
+| `sast` | PR + main | Semgrep → SARIF (Security tab) |
+| `repo-scan` | PR + main | Trivy fs: vulns + secrets + misconfig → SARIF |
+| `iac-scan` | PR + main | tfsec on the Terraform → SARIF |
+| `build-app` | PR (build) / main (build+push) | Build `dogbooth-app`, **Trivy image scan**, push to Docker Hub on main |
+| `infra` | main | `terraform apply` — **gated by the `production` environment** |
+| `validate-infra` | main | Cluster `ACTIVE`, Argo CD up, Application present |
+| `deploy` | main | GitOps: bump image tag in `deploy/apps`, commit, Argo CD syncs, wait Synced+Healthy |
+| `deploy-validation` | main | `rollout status` + in-cluster smoke test (`/_stcore/health`) |
+| `monitoring` | main | Run summary; fails if a critical stage failed |
 
-## Required configuration
+Scans are **report-only** (results appear under the repo **Security** tab); flip
+`exit-code: "1"` (Trivy) / add `--error` (Semgrep) to make them gate the build.
 
-All config is read from **GitHub Actions secrets**. Set them under
-**Settings → Secrets and variables → Actions → Secrets** (not the Variables tab).
-Reusable workflows receive them via `secrets: inherit` from `deploy.yml`.
+## GitOps (Argo CD)
 
-| Secret | Used by | Required? | Notes |
-| --- | --- | --- | --- |
-| `AWS_ROLE_ARN` | infra, cd | **yes** | IAM role assumed via GitHub OIDC (Terraform + EKS perms). |
-| `AWS_REGION` | infra, cd | no | Defaults to `us-east-1` if unset. |
-| `EKS_CLUSTER_NAME` | cd | **yes (cd)** | e.g. `jark-stack`. |
-| `HUGGINGFACE_TOKEN` | infra | no | Passed as `TF_VAR_huggingface_token`. |
-| `TF_STATE_BUCKET` | infra | for `apply` | S3 remote-state bucket. Without it, state is ephemeral (fine for `plan`). |
-| `TF_STATE_KEY` | infra | no | Defaults to `jark-stack/terraform.tfstate`. |
-| `TF_STATE_REGION` | infra | no | Defaults to `AWS_REGION`. |
-| `TF_LOCK_TABLE` | infra | no | DynamoDB lock table. |
-| `DOCKERHUB_USERNAME` | ci, cd | no | Docker Hub namespace. Enables image push (ci) + image overrides (cd). |
-| `DOCKERHUB_TOKEN` | ci | no | Docker Hub access token (push). |
+- Argo CD is installed in-cluster by Terraform (`enable_argocd` in `addons.tf`).
+- `ai-ml/jark-stack/terraform/argocd.tf` bootstraps an Argo CD **Application** named
+  `dogbooth` that watches **`deploy/apps/`** on `main` (Kustomize), auto-sync + self-heal.
+- `deploy/apps/` holds the deployable manifests (`streamlit.yaml`, `ray-service.yaml`,
+  `kustomization.yaml`). The pipeline runs `kustomize edit set image …:<sha>` and
+  commits — Argo CD syncs the new image. The image-tag commit is made with
+  `GITHUB_TOKEN`, so it does **not** retrigger the pipeline.
+- The Ray model service keeps its **upstream public image** (its code is unchanged
+  and the 6 GB image isn't pushed). Only the Streamlit app is built/pushed.
 
-> **Important:** store these as **Secrets**, not Variables. The workflows read
-> `${{ secrets.* }}`; a value placed in the Variables tab won't be picked up
-> (that was the original `AWS_REGION` failure).
+## Required configuration (GitHub Actions secrets)
 
-Optional/absent secrets degrade gracefully: no `TF_STATE_BUCKET` → ephemeral
-state (plan only); no `DOCKERHUB_*` → ci builds without pushing and cd deploys the
-upstream public images.
+| Secret | Used by | Notes |
+| --- | --- | --- |
+| `AWS_ROLE_ARN` | infra, validate, deploy | OIDC role (Terraform + EKS) |
+| `AWS_REGION` | infra, deploy | defaults to `us-east-1` if unset |
+| `EKS_CLUSTER_NAME` | validate, deploy | e.g. `jark-stack` |
+| `HUGGINGFACE_TOKEN` | infra | `TF_VAR_huggingface_token` |
+| `TF_STATE_BUCKET` (+ `TF_STATE_KEY` / `TF_STATE_REGION` / `TF_LOCK_TABLE`) | infra | remote state (required for apply) |
+| `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` | build-app, deploy | push the app image + pull secret |
 
-## One-time setup
+Permissions used: `contents: write` (GitOps commit), `id-token: write` (OIDC),
+`security-events: write` (SARIF).
 
-1. **OIDC trust** — create an IAM role trusting `token.actions.githubusercontent.com`,
-   grant it Terraform/EKS permissions, and put its ARN in the `AWS_ROLE_ARN` secret.
-2. **Remote state** — create the S3 bucket (+ optional DynamoDB lock table) and set
-   `TF_STATE_BUCKET`/`TF_STATE_KEY`/`TF_LOCK_TABLE` secrets. The `infra` job injects
-   a partial `backend "s3" {}` at runtime; local `terraform` keeps local state.
-3. **Docker Hub** — create the `dogbooth-app` and `dogbooth` repos and set
-   `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN`. If the repos are private, add an
-   `imagePullSecret` in the cluster.
-4. **Approval gate (optional)** — add reviewers to the `production` environment to
-   gate `apply` and `cd`.
+## Teardown
 
-## Teardown / cleanup
+See `ai-ml/jark-stack/terraform/cleanup.sh` — it deletes the Argo CD Application
+first (so self-heal doesn't re-create the apps), then runs the strategic teardown.
 
-Two ways to tear everything down. Both default to region **us-east-1** and cluster
-**jark-stack**. App images come from Docker Hub and there is no ECR dependency, so
-no extra registry permissions are needed to destroy.
+## Notes / caveats
 
-### Strategic cleanup script (recommended)
-
-`ai-ml/jark-stack/terraform/cleanup.sh` is resilient to broken/lost Terraform
-state — it drains Kubernetes-owned AWS resources first (LoadBalancers, Karpenter
-instances), runs `terraform destroy` in dependency order, then sweeps any leaked
-resources by tag (ELBs, target groups, security groups, ENIs, EBS volumes, the
-EKS KMS alias, CloudWatch log groups) and reports leftover IAM roles.
-
-```bash
-cd ai-ml/jark-stack/terraform
-./cleanup.sh --dry-run            # preview, deletes nothing
-./cleanup.sh                      # interactive (type the cluster name to confirm)
-./cleanup.sh --yes                # non-interactive
-./cleanup.sh --skip-terraform --yes   # state is broken? sweep AWS directly
-# overrides:
-REGION=us-east-1 CLUSTER_NAME=jark-stack ./cleanup.sh
-```
-
-### Terraform-only destroy (CI)
-
-For a clean state, the `infra` workflow can destroy via **Run workflow →
-action: destroy** (or `terraform destroy` locally). This does *not* do the
-tag-based sweep, so prefer `cleanup.sh` if state has drifted or resources have
-leaked.
-
-> Reminder: an EKS cluster is region-scoped. Cleaning up in `us-east-1` does not
-> touch anything in other regions — tear those down separately with
-> `REGION=<region> ./cleanup.sh`.
+- **Approval gate:** the `production` environment (required reviewer) gates the
+  `terraform apply` job. Approve it from the run's *Review deployments* prompt.
+- **Branch protection:** the GitOps image-tag commit pushes to `main` with
+  `GITHUB_TOKEN`; if `main` is protected against Actions pushes, allow the
+  `github-actions` bot or use a deploy key/PAT.
+- **First Argo CD sync** can take a minute; the pipeline forces a refresh.

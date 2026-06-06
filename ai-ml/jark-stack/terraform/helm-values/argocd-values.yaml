@@ -1,0 +1,6 @@
+# Minimal Argo CD values — defaults are sufficient for GitOps sync.
+# Run the API server without its own TLS (terminate at the nginx ingress / use
+# port-forward), which keeps the install simple for this blueprint.
+configs:
+  params:
+    server.insecure: true

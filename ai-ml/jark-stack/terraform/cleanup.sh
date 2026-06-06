@@ -24,6 +24,7 @@ set -uo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-jark-stack}"
 REGION="${REGION:-us-east-1}"
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$TF_DIR/../../.." && pwd)"
 
 AUTO_APPROVE="false"
 SKIP_TERRAFORM="false"
@@ -122,10 +123,12 @@ fi
 # --------------------------------------------------------------------------- #
 phase "Phase 1: Drain Kubernetes-owned AWS resources"
 if [[ "$KUBE_OK" == "true" ]]; then
-  # 1a. Delete the demo apps (Streamlit ingress + RayService), then their
-  #     namespaces (covers app images from any registry — Docker Hub, etc.).
-  run kubectl delete -f "${TF_DIR}/src/app/streamlit.yaml"     --ignore-not-found --timeout=120s
-  run kubectl delete -f "${TF_DIR}/src/service/ray-service.yaml" --ignore-not-found --timeout=120s
+  # 1a. Delete the Argo CD Application first — its finalizer cascades to prune the
+  #     synced resources, and removing it stops self-heal from re-creating them.
+  run kubectl -n argocd delete application dogbooth --ignore-not-found --timeout=120s
+  # Fallback: delete the app manifests + namespaces directly (in case Argo CD is gone).
+  run kubectl delete -f "${REPO_ROOT}/deploy/apps/streamlit.yaml"   --ignore-not-found --timeout=120s
+  run kubectl delete -f "${REPO_ROOT}/deploy/apps/ray-service.yaml" --ignore-not-found --timeout=120s
   run kubectl delete namespace dogbooth dogbooth-app --ignore-not-found --timeout=120s
 
   # 1b. Let Karpenter terminate the instances it launched (delete NodePools/NodeClaims).
