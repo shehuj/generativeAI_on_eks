@@ -20,7 +20,7 @@ trap stopRunningProcess EXIT TERM
 
 source ${VIRTUAL_ENV}/bin/activate
 
-streamlit run ${HOME}/streamlit_app.py &
+streamlit run ${HOME}/streamlit.py &
 APP_ID=${!}
 
 wait ${APP_ID}
