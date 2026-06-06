@@ -3,11 +3,10 @@ name: Infra
 # Reusable infrastructure pipeline — provisions the JARK stack EKS platform
 # with Terraform (ai-ml/jark-stack/terraform).
 #
-# Runs `plan` standalone on pull requests, and is called by deploy.yml with
-# action=apply as part of the orchestrated infra+ci -> cd pipeline.
-#
-# Requires a remote state backend (S3) for apply to be meaningful — configure
-# the TF_STATE_* repository variables (see .github/workflows/README.md).
+# Configuration is read from a single AWS Secrets Manager secret (JSON) at
+# runtime — see .github/workflows/README.md. The only GitHub-side config needed
+# is the OIDC role (secrets.AWS_ROLE_ARN); the bootstrap region defaults to
+# us-west-2 and can be overridden with vars.AWS_REGION.
 
 on:
   workflow_call:
@@ -28,6 +27,7 @@ on:
     paths:
       - "ai-ml/jark-stack/terraform/**"
       - ".github/workflows/infra.yml"
+      - ".github/actions/aws-config/**"
 
 permissions:
   contents: read
@@ -40,6 +40,9 @@ concurrency:
 env:
   TF_DIR: ai-ml/jark-stack/terraform
   TF_VERSION: "1.9.8"
+  # Bootstrap region used to assume the role and read Secrets Manager. The secret
+  # may carry its own AWS_REGION which then takes over for Terraform/EKS.
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
 
 jobs:
   terraform:
@@ -51,33 +54,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Preflight — required configuration present
+      - name: Preflight — OIDC role present
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
-          missing=0
-          [ -z "$AWS_ROLE_ARN" ] && { echo "::error::secrets.AWS_ROLE_ARN is required"; missing=1; }
-          [ -z "$AWS_REGION" ]   && { echo "::error::vars.AWS_REGION is required"; missing=1; }
-          [ "$missing" = "1" ] && exit 1
-          echo "Preflight OK"
+          [ -z "$AWS_ROLE_ARN" ] && { echo "::error::secrets.AWS_ROLE_ARN is required"; exit 1; }
+          echo "Preflight OK (region: ${AWS_REGION})"
 
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # Assume the role and load HUGGINGFACE_TOKEN, TF_STATE_*, EKS_CLUSTER_NAME,
+      # AWS_REGION, etc. from Secrets Manager into the job environment.
+      - name: AWS auth + load config
+        uses: ./.github/actions/aws-config
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          region: ${{ env.AWS_REGION }}
+          secret-id: ${{ vars.CONFIG_SECRET_ID || 'jark-stack/config' }}
 
       - name: terraform fmt -check
         working-directory: ${{ env.TF_DIR }}
         run: terraform fmt -check
 
       - name: Configure S3 backend (when TF_STATE_BUCKET is set)
-        if: vars.TF_STATE_BUCKET != ''
+        if: env.TF_STATE_BUCKET != ''
         working-directory: ${{ env.TF_DIR }}
         run: |
           cat > backend_ci_override.tf <<'EOF'
@@ -89,14 +91,14 @@ jobs:
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
         run: |
-          if [ -n "${{ vars.TF_STATE_BUCKET }}" ]; then
+          if [ -n "${TF_STATE_BUCKET:-}" ]; then
             terraform init -input=false -upgrade \
-              -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
-              -backend-config="key=${{ vars.TF_STATE_KEY || 'jark-stack/terraform.tfstate' }}" \
-              -backend-config="region=${{ vars.TF_STATE_REGION || vars.AWS_REGION }}" \
-              ${{ vars.TF_LOCK_TABLE != '' && format('-backend-config=dynamodb_table={0}', vars.TF_LOCK_TABLE) || '' }}
+              -backend-config="bucket=${TF_STATE_BUCKET}" \
+              -backend-config="key=${TF_STATE_KEY:-jark-stack/terraform.tfstate}" \
+              -backend-config="region=${TF_STATE_REGION:-$AWS_REGION}" \
+              ${TF_LOCK_TABLE:+-backend-config=dynamodb_table=$TF_LOCK_TABLE}
           else
-            echo "::warning::No TF_STATE_BUCKET configured — using ephemeral local state (fine for plan, NOT for apply)."
+            echo "::warning::No TF_STATE_BUCKET in the config secret — using ephemeral local state (fine for plan, NOT for apply)."
             terraform init -input=false -upgrade
           fi
 
@@ -108,19 +110,22 @@ jobs:
         if: inputs.action != 'destroy'
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+          TF_VAR_huggingface_token: ${{ env.HUGGINGFACE_TOKEN }}
+          TF_VAR_region: ${{ env.AWS_REGION }}
         run: terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
         if: inputs.action == 'apply' && github.ref == 'refs/heads/main'
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+          TF_VAR_huggingface_token: ${{ env.HUGGINGFACE_TOKEN }}
+          TF_VAR_region: ${{ env.AWS_REGION }}
         run: terraform apply -input=false -auto-approve tfplan
 
       - name: Terraform destroy
         if: inputs.action == 'destroy'
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+          TF_VAR_huggingface_token: ${{ env.HUGGINGFACE_TOKEN }}
+          TF_VAR_region: ${{ env.AWS_REGION }}
         run: terraform destroy -input=false -auto-approve
