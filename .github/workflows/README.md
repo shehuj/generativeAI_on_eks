@@ -25,22 +25,20 @@ them on their own (e.g. `infra` with `action: plan` on a PR, or `cd` via
 
 ## Required configuration
 
-Config lives in **AWS Secrets Manager**, not in GitHub. The `infra` and `cd`
-jobs assume the OIDC role, then read one JSON secret at runtime (via the
-`.github/actions/aws-config` composite action) and export each key as an env var.
+Config lives in **AWS Secrets Manager**, not in GitHub. The `infra`, `cd`, and
+`ci` (build) jobs assume the OIDC role, then read one JSON secret at runtime (via
+the `.github/actions/aws-config` composite action) and export each key as an env var.
 
 ### GitHub side (the bootstrap minimum)
 
 The OIDC role *is* the AWS credential, so it must live in GitHub. Everything else
-can come from Secrets Manager.
+comes from Secrets Manager.
 
 | Where | Name | Required? | Notes |
 | --- | --- | --- | --- |
-| **Secret** | `AWS_ROLE_ARN` | **yes** | IAM role assumed via GitHub OIDC. |
+| **Secret** | `AWS_ROLE_ARN` | **yes** | IAM role assumed via GitHub OIDC. The only required GitHub setting. |
 | Variable | `AWS_REGION` | no | Bootstrap region for auth + Secrets Manager. Defaults to `us-west-2`. |
 | Variable | `CONFIG_SECRET_ID` | no | Secrets Manager secret id. Defaults to `jark-stack/config`. |
-| Secret | `DOCKERHUB_TOKEN` | only for `ci` | Docker Hub push token (`ci.yml` still reads Docker Hub creds from GitHub — see note). |
-| Variable | `DOCKERHUB_USERNAME` | only for `ci` | Docker Hub namespace for `ci.yml` image builds. |
 
 ### AWS Secrets Manager side (the `jark-stack/config` secret)
 
@@ -55,12 +53,15 @@ A single JSON secret holds the rest. Any key present is exported to the job env:
   "TF_STATE_KEY":       "jark-stack/terraform.tfstate",
   "TF_STATE_REGION":    "us-west-2",
   "TF_LOCK_TABLE":      "my-tf-lock-table",
-  "DOCKERHUB_USERNAME": "myuser"
+  "DOCKERHUB_USERNAME": "myuser",
+  "DOCKERHUB_TOKEN":    "dckr_pat_xxx"
 }
 ```
 
 `HUGGINGFACE_TOKEN` / `DOCKERHUB_TOKEN` are masked in logs. `TF_STATE_BUCKET` is
 required for `apply` (without it, state is ephemeral — fine for `plan` only).
+`DOCKERHUB_*` enable image push (`ci`) and image overrides (`cd`); omit them to
+build without pushing and deploy the upstream public images.
 
 ## One-time setup
 
@@ -77,13 +78,13 @@ required for `apply` (without it, state is ephemeral — fine for `plan` only).
 3. **Remote state** — create the S3 bucket (+ optional DynamoDB lock table) and put
    `TF_STATE_BUCKET`/`TF_STATE_KEY`/`TF_LOCK_TABLE` in the secret. The `infra` job
    injects a partial `backend "s3" {}` at runtime; local `terraform` keeps local state.
-4. **Docker Hub** — create the `dogbooth-app` and `dogbooth` repos. Put
-   `DOCKERHUB_USERNAME` in the secret (used by `cd` for image refs) **and** as a
-   GitHub variable + `DOCKERHUB_TOKEN` GitHub secret (used by `ci` to push). If the
-   repos are private, add an `imagePullSecret` in the cluster.
+4. **Docker Hub** — create the `dogbooth-app` and `dogbooth` repos, and put
+   `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` in the config secret (`ci` uses them to
+   push, `cd` for image refs). If the repos are private, add an `imagePullSecret`
+   in the cluster.
 5. **Approval gate (optional)** — add reviewers to the `production` environment.
 
-> **Note on `ci.yml`:** the build pipeline does not authenticate to AWS, so it
-> still reads Docker Hub creds from GitHub (`vars.DOCKERHUB_USERNAME` /
-> `secrets.DOCKERHUB_TOKEN`). `infra` and `cd` read everything from Secrets
-> Manager. Ask if you want `ci` migrated to Secrets Manager too (adds OIDC to CI).
+> **All three pipelines read from Secrets Manager.** `ci`'s build job pushes
+> best-effort: if `AWS_ROLE_ARN` is absent (e.g. fork PRs) or the secret can't be
+> read, it builds to cache only and still passes — so lint/test/build work on PRs
+> without any AWS access.
