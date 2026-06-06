@@ -7,7 +7,7 @@ variable "name" {
 # NOTE: Trainium and Inferentia are only available in us-west-2 and us-east-1 regions
 variable "region" {
   description = "region"
-  default     = "us-west-2"
+  default     = "us-east-1"
   type        = string
 }
 

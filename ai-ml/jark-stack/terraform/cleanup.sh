@@ -14,7 +14,7 @@
 #
 # Env overrides:
 #   CLUSTER_NAME (default: jark-stack)
-#   REGION       (default: us-west-2)
+#   REGION       (default: us-east-1)
 #
 set -uo pipefail
 
@@ -22,7 +22,7 @@ set -uo pipefail
 # Configuration & flags
 # --------------------------------------------------------------------------- #
 CLUSTER_NAME="${CLUSTER_NAME:-jark-stack}"
-REGION="${REGION:-us-west-2}"
+REGION="${REGION:-us-east-1}"
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 AUTO_APPROVE="false"

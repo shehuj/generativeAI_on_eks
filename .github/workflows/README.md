@@ -32,7 +32,7 @@ Reusable workflows receive them via `secrets: inherit` from `deploy.yml`.
 | Secret | Used by | Required? | Notes |
 | --- | --- | --- | --- |
 | `AWS_ROLE_ARN` | infra, cd | **yes** | IAM role assumed via GitHub OIDC (Terraform + EKS perms). |
-| `AWS_REGION` | infra, cd | no | Defaults to `us-west-2` if unset. |
+| `AWS_REGION` | infra, cd | no | Defaults to `us-east-1` if unset. |
 | `EKS_CLUSTER_NAME` | cd | **yes (cd)** | e.g. `jark-stack`. |
 | `HUGGINGFACE_TOKEN` | infra | no | Passed as `TF_VAR_huggingface_token`. |
 | `TF_STATE_BUCKET` | infra | for `apply` | S3 remote-state bucket. Without it, state is ephemeral (fine for `plan`). |

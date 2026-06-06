@@ -27,7 +27,7 @@ terraform {
   # ##  Used for end-to-end testing on project; update to suit your needs
   # backend "s3" {
   #   bucket = "doeks-github-actions-e2e-test-state"
-  #   region = "us-west-2"
+  #   region = "us-east-1"
   #   key    = "e2e/jark/terraform.tfstate"
   # }
 }

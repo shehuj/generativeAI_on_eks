@@ -6,7 +6,7 @@ name: CD
 #   - src/app/streamlit.yaml        -> Streamlit UI + Service + Ingress
 #
 # Configuration is read from GitHub Actions secrets. Required: AWS_ROLE_ARN,
-# EKS_CLUSTER_NAME. Optional: AWS_REGION (defaults us-west-2), DOCKERHUB_USERNAME.
+# EKS_CLUSTER_NAME. Optional: AWS_REGION (defaults us-east-1), DOCKERHUB_USERNAME.
 #
 # Called by deploy.yml only after BOTH infra and ci succeed. Can also be run
 # manually via workflow_dispatch to roll out a specific image tag.
@@ -57,7 +57,7 @@ jobs:
           for v in AWS_REGION EKS_CLUSTER_NAME DOCKERHUB_USERNAME; do
             val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
           done
-          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-west-2" >> "$GITHUB_ENV"
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-east-1" >> "$GITHUB_ENV"
           echo "Deploying to cluster '${EKS_CLUSTER_NAME}'"
 
       - name: Configure AWS credentials (OIDC)
