@@ -25,39 +25,40 @@ them on their own (e.g. `infra` with `action: plan` on a PR, or `cd` via
 
 ## Required configuration
 
-Set these under **Settings → Secrets and variables → Actions**.
+All config is read from **GitHub Actions secrets**. Set them under
+**Settings → Secrets and variables → Actions → Secrets** (not the Variables tab).
+Reusable workflows receive them via `secrets: inherit` from `deploy.yml`.
 
-### Secrets
+| Secret | Used by | Required? | Notes |
+| --- | --- | --- | --- |
+| `AWS_ROLE_ARN` | infra, cd | **yes** | IAM role assumed via GitHub OIDC (Terraform + EKS perms). |
+| `AWS_REGION` | infra, cd | no | Defaults to `us-west-2` if unset. |
+| `EKS_CLUSTER_NAME` | cd | **yes (cd)** | e.g. `jark-stack`. |
+| `HUGGINGFACE_TOKEN` | infra | no | Passed as `TF_VAR_huggingface_token`. |
+| `TF_STATE_BUCKET` | infra | for `apply` | S3 remote-state bucket. Without it, state is ephemeral (fine for `plan`). |
+| `TF_STATE_KEY` | infra | no | Defaults to `jark-stack/terraform.tfstate`. |
+| `TF_STATE_REGION` | infra | no | Defaults to `AWS_REGION`. |
+| `TF_LOCK_TABLE` | infra | no | DynamoDB lock table. |
+| `DOCKERHUB_USERNAME` | ci, cd | no | Docker Hub namespace. Enables image push (ci) + image overrides (cd). |
+| `DOCKERHUB_TOKEN` | ci | no | Docker Hub access token (push). |
 
-| Secret | Used by | Notes |
-| --- | --- | --- |
-| `AWS_ROLE_ARN` | infra, cd | IAM role assumed via GitHub OIDC. Needs Terraform/EKS permissions. |
-| `HUGGINGFACE_TOKEN` | infra | Passed as `TF_VAR_huggingface_token`. |
-| `DOCKERHUB_TOKEN` | ci | Docker Hub access token (Account Settings → Security → New Access Token). Required to push images. |
+> **Important:** store these as **Secrets**, not Variables. The workflows read
+> `${{ secrets.* }}`; a value placed in the Variables tab won't be picked up
+> (that was the original `AWS_REGION` failure).
 
-### Variables
-
-| Variable | Used by | Example / default |
-| --- | --- | --- |
-| `AWS_REGION` | infra, cd | `us-west-2` |
-| `EKS_CLUSTER_NAME` | cd | `jark-stack` |
-| `DOCKERHUB_USERNAME` | ci, cd | Docker Hub user/org namespace, e.g. `myuser` — *optional*. Images are pushed/deployed as `docker.io/<DOCKERHUB_USERNAME>/dogbooth-app` and `.../dogbooth`. If unset, CI builds without pushing and CD deploys the upstream public images. |
-| `TF_STATE_BUCKET` | infra | S3 bucket for remote state. **Required for `apply`** (local state is ephemeral in CI). |
-| `TF_STATE_KEY` | infra | default `jark-stack/terraform.tfstate` |
-| `TF_STATE_REGION` | infra | default = `AWS_REGION` |
-| `TF_LOCK_TABLE` | infra | DynamoDB lock table (optional) |
+Optional/absent secrets degrade gracefully: no `TF_STATE_BUCKET` → ephemeral
+state (plan only); no `DOCKERHUB_*` → ci builds without pushing and cd deploys the
+upstream public images.
 
 ## One-time setup
 
-1. **OIDC trust** — create an IAM role trusting `token.actions.githubusercontent.com`
-   and grant it Terraform/EKS access; put its ARN in `AWS_ROLE_ARN`.
-2. **Remote state** — create the S3 bucket (and optional DynamoDB lock table) and
-   set the `TF_STATE_*` variables. The `infra` job injects a partial `backend "s3" {}`
-   at runtime, so local `terraform` keeps using local state.
-3. **Docker Hub** — create the `dogbooth-app` and `dogbooth` repositories under your
-   Docker Hub account/org, set `DOCKERHUB_USERNAME`, and add a `DOCKERHUB_TOKEN`
-   access token. This enables image build/push (CI) and image overrides (CD).
-   If the repos are **private**, also create an `imagePullSecret` in the cluster so
-   the nodes can pull them (public repos need nothing).
-4. **Approval gate (optional)** — add required reviewers to the `production`
-   environment to gate `apply` and `cd`.
+1. **OIDC trust** — create an IAM role trusting `token.actions.githubusercontent.com`,
+   grant it Terraform/EKS permissions, and put its ARN in the `AWS_ROLE_ARN` secret.
+2. **Remote state** — create the S3 bucket (+ optional DynamoDB lock table) and set
+   `TF_STATE_BUCKET`/`TF_STATE_KEY`/`TF_LOCK_TABLE` secrets. The `infra` job injects
+   a partial `backend "s3" {}` at runtime; local `terraform` keeps local state.
+3. **Docker Hub** — create the `dogbooth-app` and `dogbooth` repos and set
+   `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN`. If the repos are private, add an
+   `imagePullSecret` in the cluster.
+4. **Approval gate (optional)** — add reviewers to the `production` environment to
+   gate `apply` and `cd`.

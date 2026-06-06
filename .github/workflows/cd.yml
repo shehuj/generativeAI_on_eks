@@ -5,6 +5,9 @@ name: CD
 #   - src/service/ray-service.yaml  -> RayService "dogbooth" (model serving)
 #   - src/app/streamlit.yaml        -> Streamlit UI + Service + Ingress
 #
+# Configuration is read from GitHub Actions secrets. Required: AWS_ROLE_ARN,
+# EKS_CLUSTER_NAME. Optional: AWS_REGION (defaults us-west-2), DOCKERHUB_USERNAME.
+#
 # Called by deploy.yml only after BOTH infra and ci succeed. Can also be run
 # manually via workflow_dispatch to roll out a specific image tag.
 
@@ -42,24 +45,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Preflight — required configuration present
+      - name: Load config from GitHub secrets
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          missing=0
-          [ -z "$AWS_ROLE_ARN" ]      && { echo "::error::secrets.AWS_ROLE_ARN is required"; missing=1; }
-          [ -z "$AWS_REGION" ]        && { echo "::error::vars.AWS_REGION is required"; missing=1; }
-          [ -z "$EKS_CLUSTER_NAME" ]  && { echo "::error::vars.EKS_CLUSTER_NAME is required"; missing=1; }
-          [ "$missing" = "1" ] && exit 1
-          echo "Preflight OK"
+          [ -z "$AWS_ROLE_ARN" ]     && { echo "::error::secrets.AWS_ROLE_ARN is required"; exit 1; }
+          [ -z "$EKS_CLUSTER_NAME" ] && { echo "::error::secrets.EKS_CLUSTER_NAME is required"; exit 1; }
+          for v in AWS_REGION EKS_CLUSTER_NAME DOCKERHUB_USERNAME; do
+            val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-west-2" >> "$GITHUB_ENV"
+          echo "Deploying to cluster '${EKS_CLUSTER_NAME}'"
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -67,18 +72,18 @@ jobs:
           version: v1.30.0
 
       - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name "${{ vars.EKS_CLUSTER_NAME }}" --region "${{ vars.AWS_REGION }}"
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
 
       - name: Resolve image overrides
         id: img
         run: |
           TAG="${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ vars.DOCKERHUB_USERNAME }}" ]; then
-            echo "app_image=docker.io/${{ vars.DOCKERHUB_USERNAME }}/dogbooth-app:${TAG}" >> "$GITHUB_OUTPUT"
-            echo "service_image=docker.io/${{ vars.DOCKERHUB_USERNAME }}/dogbooth:${TAG}" >> "$GITHUB_OUTPUT"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+            echo "app_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth-app:${TAG}" >> "$GITHUB_OUTPUT"
+            echo "service_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth:${TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::DOCKERHUB_USERNAME not set — deploying the upstream public images declared in the manifests."
+            echo "::warning::DOCKERHUB_USERNAME secret not set — deploying the upstream public images declared in the manifests."
             echo "app_image="     >> "$GITHUB_OUTPUT"
             echo "service_image=" >> "$GITHUB_OUTPUT"
           fi
