@@ -117,7 +117,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.30.0
+        env:
+          TRIVY_SKIP_DIRS: ".terraform,website,node_modules"
         with:
           scan-type: fs
           scan-ref: .
@@ -126,7 +128,6 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: "0" # report-only; set to "1" to fail on findings
-          skip-dirs: .terraform,website,node_modules
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
@@ -185,7 +186,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Container scan (Trivy image)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.30.0
         with:
           scan-type: image
           image-ref: ${{ steps.meta.outputs.image }}
@@ -294,7 +295,7 @@ jobs:
     name: Deploy (Argo CD GitOps)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: [validate-infra]
+    needs: [validate-infra, build-app]
     steps:
       - uses: actions/checkout@v4
         with:
