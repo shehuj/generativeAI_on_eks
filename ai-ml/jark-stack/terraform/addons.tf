@@ -116,9 +116,7 @@ module "eks_blueprints_addons" {
     }
   }
   karpenter = {
-    chart_version       = "0.37.0"
-    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-    repository_password = data.aws_ecrpublic_authorization_token.token.password
+    chart_version = "0.37.0"
     source_policy_documents = [
       data.aws_iam_policy_document.karpenter_controller_policy.json
     ]
@@ -255,10 +253,8 @@ module "data_addons" {
   #---------------------------------------------------------------
   enable_kubecost = var.enable_kubecost
   kubecost_helm_config = {
-    values              = [templatefile("${path.module}/helm-values/kubecost-values.yaml", {})]
-    version             = "2.2.2"
-    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-    repository_password = data.aws_ecrpublic_authorization_token.token.password
+    values  = [templatefile("${path.module}/helm-values/kubecost-values.yaml", {})]
+    version = "2.2.2"
   }
 
   #---------------------------------------------------------------

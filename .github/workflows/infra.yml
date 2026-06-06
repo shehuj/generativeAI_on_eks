@@ -4,7 +4,7 @@ name: Infra
 # with Terraform (ai-ml/jark-stack/terraform).
 #
 # Configuration is read from GitHub Actions secrets. Required: AWS_ROLE_ARN.
-# Optional: AWS_REGION (defaults us-west-2), HUGGINGFACE_TOKEN, TF_STATE_BUCKET,
+# Optional: AWS_REGION (defaults us-east-1), HUGGINGFACE_TOKEN, TF_STATE_BUCKET,
 # TF_STATE_KEY, TF_STATE_REGION, TF_LOCK_TABLE.
 
 on:
@@ -51,7 +51,7 @@ jobs:
 
       # Map secrets into the job env so later steps can use shell vars and `if:`
       # conditions (secrets can't be referenced directly in `if:`). AWS_REGION
-      # falls back to us-west-2 when the secret is not set.
+      # falls back to us-east-1 when the secret is not set.
       - name: Load config from GitHub secrets
         env:
           AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
@@ -66,7 +66,7 @@ jobs:
           for v in AWS_REGION HUGGINGFACE_TOKEN TF_STATE_BUCKET TF_STATE_KEY TF_STATE_REGION TF_LOCK_TABLE; do
             val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
           done
-          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-west-2" >> "$GITHUB_ENV"
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-east-1" >> "$GITHUB_ENV"
           echo "Config loaded from GitHub secrets"
 
       - uses: hashicorp/setup-terraform@v3
