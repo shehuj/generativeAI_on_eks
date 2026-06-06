@@ -196,6 +196,10 @@ module "data_addons" {
     namespace        = kubernetes_namespace_v1.jupyterhub.id
     create_namespace = false
     values           = [file("${path.module}/helm-values/jupyterhub-values.yaml")]
+    # Large GPU singleuser image can be slow to pull; give install headroom and
+    # roll back cleanly on failure so re-applies are not blocked by a stuck release.
+    timeout         = 900
+    cleanup_on_fail = true
   }
 
   enable_volcano = true

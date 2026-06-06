@@ -1,0 +1,4 @@
+# Test-only dependencies for the JARK stack app tests.
+# The app's heavy runtime deps (streamlit, ray, torch, diffusers, fastapi) are
+# stubbed in conftest.py, so they are intentionally NOT required here.
+pytest>=7.4

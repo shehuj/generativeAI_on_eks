@@ -57,3 +57,13 @@ singleuser:
 scheduling:
   userScheduler:
     enabled: false
+# The singleuser GPU image is ~6 GB and takes minutes to pull. The default
+# pre-install image-puller hook blocks `helm install` on that pull, which
+# exceeds the Helm timeout and fails the release. Disable it so install does not
+# wait on the pull; the image is fetched when a user server starts
+# (singleuser.startTimeout: 600 covers that first cold pull).
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false

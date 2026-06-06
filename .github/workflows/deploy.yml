@@ -1,0 +1,67 @@
+name: Deploy JARK stack
+
+# Top-level orchestrator that deploys the apps.
+#
+#   ┌──────────┐     ┌──────────┐
+#   │  infra   │     │    ci    │   (run in parallel — no dependency between them)
+#   └────┬─────┘     └────┬─────┘
+#        └──────┬─────────┘
+#               ▼
+#           ┌────────┐
+#           │   cd   │           (starts only after BOTH infra AND ci succeed)
+#           └────────┘
+#
+# Each stage is a separate, independently runnable pipeline (infra.yml / ci.yml /
+# cd.yml). This workflow just composes them with the required ordering.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ai-ml/jark-stack/**"
+  workflow_dispatch:
+    inputs:
+      run_infra:
+        description: "Run the infra (Terraform apply) stage"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- Stage 1a: Infrastructure (parallel with CI) ----
+  infra:
+    name: Infra
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_infra }}
+    uses: ./.github/workflows/infra.yml
+    with:
+      action: apply
+    secrets: inherit
+
+  # ---- Stage 1b: CI (parallel with Infra) ----
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ---- Gate: CD waits for BOTH infra and ci ----
+  cd:
+    name: CD
+    needs: [infra, ci]
+    # Proceed when both prerequisites succeeded. `always()` + explicit result
+    # checks let CD still run when infra was intentionally skipped via dispatch,
+    # but never when either prerequisite failed or was cancelled.
+    if: >-
+      ${{ always()
+        && needs.ci.result == 'success'
+        && (needs.infra.result == 'success' || needs.infra.result == 'skipped') }}
+    uses: ./.github/workflows/cd.yml
+    with:
+      image_tag: ${{ needs.ci.outputs.image_tag }}
+    secrets: inherit
