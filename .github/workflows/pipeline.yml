@@ -336,22 +336,22 @@ jobs:
           curl -sfLo /tmp/kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
           tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
           kustomize version
-      - name: Bump image tag (GitOps) and commit
+      - name: Bump image tag on the gitops branch
         if: needs.build-app.outputs.pushed == 'true'
         run: |
           set -euo pipefail
+          # `main` is protected (PR + signed commits), so GitOps state lives on a
+          # dedicated unprotected `gitops` branch that Argo CD tracks. Reset it to
+          # the current main commit, set the app image, and push.
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -C gitops "$GITHUB_SHA"
           cd "$GITOPS_DIR"
           kustomize edit set image "${UPSTREAM_APP_IMAGE}=${{ needs.build-app.outputs.image }}"
           cd - >/dev/null
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- "$GITOPS_DIR/kustomization.yaml"; then
-            git add "$GITOPS_DIR/kustomization.yaml"
-            git commit -m "deploy: dogbooth-app ${{ needs.build-app.outputs.tag }} [skip ci]"
-            git push origin HEAD:main
-          else
-            echo "No image change to commit."
-          fi
+          git add "$GITOPS_DIR/kustomization.yaml"
+          git commit -m "deploy: dogbooth-app ${{ needs.build-app.outputs.tag }} [skip ci]"
+          git push -f origin gitops
       - name: Trigger Argo CD sync and wait for healthy
         run: |
           set -euo pipefail

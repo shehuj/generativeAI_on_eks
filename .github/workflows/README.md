@@ -43,11 +43,14 @@ Scans are **report-only** (results appear under the repo **Security** tab); flip
 
 - Argo CD is installed in-cluster by Terraform (`enable_argocd` in `addons.tf`).
 - `ai-ml/jark-stack/terraform/argocd.tf` bootstraps an Argo CD **Application** named
-  `dogbooth` that watches **`deploy/apps/`** on `main` (Kustomize), auto-sync + self-heal.
+  `dogbooth` that watches **`deploy/apps/`** on the **`gitops`** branch (Kustomize),
+  auto-sync + self-heal.
 - `deploy/apps/` holds the deployable manifests (`streamlit.yaml`, `ray-service.yaml`,
-  `kustomization.yaml`). The pipeline runs `kustomize edit set image …:<sha>` and
-  commits — Argo CD syncs the new image. The image-tag commit is made with
-  `GITHUB_TOKEN`, so it does **not** retrigger the pipeline.
+  `kustomization.yaml`). Because `main` is protected (PR + signed commits), GitOps
+  state lives on a dedicated **unprotected `gitops` branch**: the pipeline resets
+  `gitops` to the current `main` commit, runs `kustomize edit set image …:<sha>`,
+  and force-pushes — Argo CD syncs the new image. The push uses `GITHUB_TOKEN`, so
+  it does **not** retrigger the pipeline.
 - The Ray model service keeps its **upstream public image** (its code is unchanged
   and the 6 GB image isn't pushed). Only the Streamlit app is built/pushed.
 
