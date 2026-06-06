@@ -14,4 +14,4 @@ resources:
 images:
   - name: public.ecr.aws/h3o5n2r0/gen-ai-demo/dogbooth-app
     newName: docker.io/captcloud01/dogbooth-app
-    newTag: 0c1b04de427a1ccea5e6d3d1d9a814ecef4cc19b
+    newTag: ed90c15b654401610fd3b4dc02af3028bee1616f
