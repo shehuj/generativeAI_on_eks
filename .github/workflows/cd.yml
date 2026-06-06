@@ -76,17 +76,42 @@ jobs:
 
       - name: Resolve image overrides
         id: img
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           TAG="${{ inputs.image_tag != '' && inputs.image_tag || github.sha }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+          # Only use the Docker Hub images when BOTH creds exist — that's the same
+          # condition under which CI actually pushes them. Otherwise fall back to
+          # the upstream public images in the manifests (avoids deploying a tag
+          # that was never pushed).
+          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "use_dockerhub=true" >> "$GITHUB_OUTPUT"
             echo "app_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth-app:${TAG}" >> "$GITHUB_OUTPUT"
             echo "service_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth:${TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::DOCKERHUB_USERNAME secret not set — deploying the upstream public images declared in the manifests."
+            echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not both set — CI does not push images; deploying the upstream public images from the manifests."
+            echo "use_dockerhub=false" >> "$GITHUB_OUTPUT"
             echo "app_image="     >> "$GITHUB_OUTPUT"
             echo "service_image=" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Configure Docker Hub pull secret (private images)
+        if: steps.img.outputs.use_dockerhub == 'true'
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for ns in dogbooth dogbooth-app; do
+            kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+            kubectl -n "$ns" create secret docker-registry dockerhub \
+              --docker-server=https://index.docker.io/v1/ \
+              --docker-username="$DOCKERHUB_USERNAME" \
+              --docker-password="$DOCKERHUB_TOKEN" \
+              --dry-run=client -o yaml | kubectl apply -f -
+            kubectl -n "$ns" patch serviceaccount default \
+              -p '{"imagePullSecrets":[{"name":"dockerhub"}]}'
+          done
 
       - name: Deploy Ray Serve model (dogbooth)
         working-directory: ${{ env.TF_DIR }}
