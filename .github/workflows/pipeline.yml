@@ -119,11 +119,15 @@ jobs:
       - name: Trivy filesystem scan
         # Run the Trivy CLI directly (avoids the trivy-action -> setup-trivy
         # transitive version breakage). Report-only: --exit-code 0.
+        # Scanners limited to vuln + secret: IaC/misconfig is handled by the
+        # dedicated tfsec job (scoped to jark-stack). The misconfig scanner would
+        # otherwise try to download Terraform modules across the whole monorepo
+        # and time out.
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$RUNNER_TEMP/bin" v0.71.0
           "$RUNNER_TEMP/bin/trivy" fs \
-            --scanners vuln,secret,misconfig --severity CRITICAL,HIGH \
+            --scanners vuln,secret --severity CRITICAL,HIGH \
             --skip-dirs .terraform,website,node_modules \
             --format sarif --output trivy-fs.sarif --exit-code 0 .
       - uses: github/codeql-action/upload-sarif@v3
