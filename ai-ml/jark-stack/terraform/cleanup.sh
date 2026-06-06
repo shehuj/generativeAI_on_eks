@@ -122,9 +122,11 @@ fi
 # --------------------------------------------------------------------------- #
 phase "Phase 1: Drain Kubernetes-owned AWS resources"
 if [[ "$KUBE_OK" == "true" ]]; then
-  # 1a. Delete the demo apps (Streamlit ingress + RayService).
+  # 1a. Delete the demo apps (Streamlit ingress + RayService), then their
+  #     namespaces (covers app images from any registry — Docker Hub, etc.).
   run kubectl delete -f "${TF_DIR}/src/app/streamlit.yaml"     --ignore-not-found --timeout=120s
   run kubectl delete -f "${TF_DIR}/src/service/ray-service.yaml" --ignore-not-found --timeout=120s
+  run kubectl delete namespace dogbooth dogbooth-app --ignore-not-found --timeout=120s
 
   # 1b. Let Karpenter terminate the instances it launched (delete NodePools/NodeClaims).
   run kubectl delete nodeclaims --all --ignore-not-found --timeout=120s

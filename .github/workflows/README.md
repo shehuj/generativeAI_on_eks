@@ -62,3 +62,38 @@ upstream public images.
    `imagePullSecret` in the cluster.
 4. **Approval gate (optional)** — add reviewers to the `production` environment to
    gate `apply` and `cd`.
+
+## Teardown / cleanup
+
+Two ways to tear everything down. Both default to region **us-east-1** and cluster
+**jark-stack**. App images come from Docker Hub and there is no ECR dependency, so
+no extra registry permissions are needed to destroy.
+
+### Strategic cleanup script (recommended)
+
+`ai-ml/jark-stack/terraform/cleanup.sh` is resilient to broken/lost Terraform
+state — it drains Kubernetes-owned AWS resources first (LoadBalancers, Karpenter
+instances), runs `terraform destroy` in dependency order, then sweeps any leaked
+resources by tag (ELBs, target groups, security groups, ENIs, EBS volumes, the
+EKS KMS alias, CloudWatch log groups) and reports leftover IAM roles.
+
+```bash
+cd ai-ml/jark-stack/terraform
+./cleanup.sh --dry-run            # preview, deletes nothing
+./cleanup.sh                      # interactive (type the cluster name to confirm)
+./cleanup.sh --yes                # non-interactive
+./cleanup.sh --skip-terraform --yes   # state is broken? sweep AWS directly
+# overrides:
+REGION=us-east-1 CLUSTER_NAME=jark-stack ./cleanup.sh
+```
+
+### Terraform-only destroy (CI)
+
+For a clean state, the `infra` workflow can destroy via **Run workflow →
+action: destroy** (or `terraform destroy` locally). This does *not* do the
+tag-based sweep, so prefer `cleanup.sh` if state has drifted or resources have
+leaked.
+
+> Reminder: an EKS cluster is region-scoped. Cleaning up in `us-east-1` does not
+> touch anything in other regions — tear those down separately with
+> `REGION=<region> ./cleanup.sh`.
