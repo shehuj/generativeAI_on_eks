@@ -110,9 +110,15 @@ jobs:
 
       - name: Wait for rollout
         run: |
-          set -euo pipefail
-          kubectl -n dogbooth-app rollout status deployment/streamlit-deployment --timeout=300s
-          echo "RayService status:"
+          set -uo pipefail
+          if ! kubectl -n dogbooth-app rollout status deployment/streamlit-deployment --timeout=600s; then
+            echo "::warning::Streamlit rollout did not complete — dumping diagnostics"
+            kubectl -n dogbooth-app get pods -o wide || true
+            kubectl -n dogbooth-app describe deployment/streamlit-deployment 2>&1 | tail -30 || true
+            kubectl -n dogbooth-app get events --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+            exit 1
+          fi
+          echo "RayService status (GPU-backed; may stay pending until Karpenter scales a g5 node):"
           kubectl -n dogbooth get rayservice dogbooth -o wide || true
 
       - name: Deployment summary
