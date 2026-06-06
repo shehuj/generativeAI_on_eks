@@ -1,13 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
-# Manifests synced to the cluster by Argo CD (see ai-ml/jark-stack/terraform/argocd.tf).
 resources:
   - streamlit.yaml
   - ray-service.yaml
-
-# This is the SOURCE template on main. The pipeline does NOT use it directly —
-# it writes a deterministic kustomization (with the app image override) onto the
-# generated `gitops` branch that Argo CD tracks. Do not merge `gitops` into main.
-# The Ray service keeps its upstream public image (not built/pushed by CI).
-images: []
+images:
+  - name: public.ecr.aws/h3o5n2r0/gen-ai-demo/dogbooth-app
+    newName: docker.io/captcloud01/dogbooth-app
+    newTag: 4c696dd224497f896046cb91b8b03dc0ec7574ce
