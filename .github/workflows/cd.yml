@@ -85,15 +85,17 @@ jobs:
           # condition under which CI actually pushes them. Otherwise fall back to
           # the upstream public images in the manifests (avoids deploying a tag
           # that was never pushed).
+          # Only the app (Streamlit) image is built/pushed by CI, so only it is
+          # overridden. The Ray service keeps the upstream public image from the
+          # manifest (its code is unchanged and the 6 GB image isn't pushed).
+          echo "service_image=" >> "$GITHUB_OUTPUT"
           if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
             echo "use_dockerhub=true" >> "$GITHUB_OUTPUT"
             echo "app_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth-app:${TAG}" >> "$GITHUB_OUTPUT"
-            echo "service_image=docker.io/${DOCKERHUB_USERNAME}/dogbooth:${TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not both set — CI does not push images; deploying the upstream public images from the manifests."
+            echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN not both set — CI does not push the app image; deploying the upstream public image from the manifest."
             echo "use_dockerhub=false" >> "$GITHUB_OUTPUT"
-            echo "app_image="     >> "$GITHUB_OUTPUT"
-            echo "service_image=" >> "$GITHUB_OUTPUT"
+            echo "app_image=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Configure Docker Hub pull secret (private images)

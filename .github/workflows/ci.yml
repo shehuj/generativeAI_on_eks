@@ -99,13 +99,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Only the lightweight Streamlit app is built/pushed here. The Ray model
+        # service image is a ~6 GB GPU image whose code (dogbooth.py) matches the
+        # upstream public image, and a 4 GB+ layer is unreliable to push to Docker
+        # Hub — so the deployment uses the upstream public service image instead.
         image:
           - name: dogbooth-app
             context: ai-ml/jark-stack/terraform/src/app
             heavy: "false"
-          - name: dogbooth
-            context: ai-ml/jark-stack/terraform/src/service
-            heavy: "true" # GPU ray-ml base image is large
     steps:
       - uses: actions/checkout@v4
 
