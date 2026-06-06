@@ -29,7 +29,7 @@ spec:
         spec:
           containers:
             - name: ray-head
-              image: docker.io/captcloud01/dogbooth:ray2.9.0
+              image: docker.io/captcloud01/dogbooth:ray2.9.1
               resources:
                 limits:
                   cpu: 2
@@ -62,7 +62,7 @@ spec:
           spec:
             containers:
               - name: ray-worker
-                image: docker.io/captcloud01/dogbooth:ray2.9.0
+                image: docker.io/captcloud01/dogbooth:ray2.9.1
                 lifecycle:
                   preStop:
                     exec:

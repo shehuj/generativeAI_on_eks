@@ -34,8 +34,9 @@ class APIIngress:
     async def generate(self, prompt: str, img_size: int = 768):
         validate_prompt(prompt)
 
-        image_ref = await self.handle.generate.remote(prompt, img_size=img_size)
-        image = await image_ref
+        # Ray Serve >= 2.9: handle.method.remote() returns a DeploymentResponse
+        # that is awaited once to get the result (no second await).
+        image = await self.handle.generate.remote(prompt, img_size=img_size)
         file_stream = BytesIO()
         image.save(file_stream, "PNG")
         return Response(content=file_stream.getvalue(), media_type="image/png")
