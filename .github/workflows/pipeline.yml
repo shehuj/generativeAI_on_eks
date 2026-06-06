@@ -117,17 +117,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.30.0
-        env:
-          TRIVY_SKIP_DIRS: ".terraform,website,node_modules"
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,secret,misconfig
-          severity: CRITICAL,HIGH
-          format: sarif
-          output: trivy-fs.sarif
-          exit-code: "0" # report-only; set to "1" to fail on findings
+        # Run the Trivy CLI directly (avoids the trivy-action -> setup-trivy
+        # transitive version breakage). Report-only: --exit-code 0.
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$RUNNER_TEMP/bin" v0.71.0
+          "$RUNNER_TEMP/bin/trivy" fs \
+            --scanners vuln,secret,misconfig --severity CRITICAL,HIGH \
+            --skip-dirs .terraform,website,node_modules \
+            --format sarif --output trivy-fs.sarif --exit-code 0 .
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
@@ -186,14 +184,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Container scan (Trivy image)
-        uses: aquasecurity/trivy-action@v0.30.0
-        with:
-          scan-type: image
-          image-ref: ${{ steps.meta.outputs.image }}
-          severity: CRITICAL,HIGH
-          format: sarif
-          output: trivy-image.sarif
-          exit-code: "0" # report-only; set to "1" to fail on findings
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "$RUNNER_TEMP/bin" v0.71.0
+          "$RUNNER_TEMP/bin/trivy" image \
+            --severity CRITICAL,HIGH \
+            --format sarif --output trivy-image.sarif --exit-code 0 \
+            "${{ steps.meta.outputs.image }}"
       - uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
