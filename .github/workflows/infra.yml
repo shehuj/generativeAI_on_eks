@@ -1,0 +1,126 @@
+name: Infra
+
+# Reusable infrastructure pipeline — provisions the JARK stack EKS platform
+# with Terraform (ai-ml/jark-stack/terraform).
+#
+# Runs `plan` standalone on pull requests, and is called by deploy.yml with
+# action=apply as part of the orchestrated infra+ci -> cd pipeline.
+#
+# Requires a remote state backend (S3) for apply to be meaningful — configure
+# the TF_STATE_* repository variables (see .github/workflows/README.md).
+
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: "plan | apply"
+        type: string
+        required: false
+        default: plan
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+  pull_request:
+    paths:
+      - "ai-ml/jark-stack/terraform/**"
+      - ".github/workflows/infra.yml"
+
+permissions:
+  contents: read
+  id-token: write # required for AWS OIDC role assumption
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: false # never cancel an in-flight apply
+
+env:
+  TF_DIR: ai-ml/jark-stack/terraform
+  TF_VERSION: "1.9.8"
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.action || 'plan' }}
+    runs-on: ubuntu-latest
+    # An "apply"/"destroy" runs against a protected environment so you can add a
+    # manual approval gate in repo settings (Settings -> Environments -> production).
+    environment: ${{ (inputs.action == 'apply' || inputs.action == 'destroy') && 'production' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight — required configuration present
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          missing=0
+          [ -z "$AWS_ROLE_ARN" ] && { echo "::error::secrets.AWS_ROLE_ARN is required"; missing=1; }
+          [ -z "$AWS_REGION" ]   && { echo "::error::vars.AWS_REGION is required"; missing=1; }
+          [ "$missing" = "1" ] && exit 1
+          echo "Preflight OK"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform fmt -check
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check
+
+      - name: Configure S3 backend (when TF_STATE_BUCKET is set)
+        if: vars.TF_STATE_BUCKET != ''
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          cat > backend_ci_override.tf <<'EOF'
+          terraform {
+            backend "s3" {}
+          }
+          EOF
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          if [ -n "${{ vars.TF_STATE_BUCKET }}" ]; then
+            terraform init -input=false -upgrade \
+              -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+              -backend-config="key=${{ vars.TF_STATE_KEY || 'jark-stack/terraform.tfstate' }}" \
+              -backend-config="region=${{ vars.TF_STATE_REGION || vars.AWS_REGION }}" \
+              ${{ vars.TF_LOCK_TABLE != '' && format('-backend-config=dynamodb_table={0}', vars.TF_LOCK_TABLE) || '' }}
+          else
+            echo "::warning::No TF_STATE_BUCKET configured — using ephemeral local state (fine for plan, NOT for apply)."
+            terraform init -input=false -upgrade
+          fi
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        if: inputs.action != 'destroy'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        if: inputs.action == 'apply' && github.ref == 'refs/heads/main'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Terraform destroy
+        if: inputs.action == 'destroy'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_huggingface_token: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: terraform destroy -input=false -auto-approve

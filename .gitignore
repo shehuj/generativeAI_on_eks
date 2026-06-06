@@ -1,0 +1,47 @@
+# ---- Terraform ----
+# Local .terraform directories (provider plugins, modules, caches)
+**/.terraform/*
+**/.terraform
+
+# Terraform state files - may contain secrets, must never be committed
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Terraform lock info for in-progress operations
+.terraform.tfstate.lock.info
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Variable files that commonly contain secrets
+*.tfvars
+*.tfvars.json
+!example.tfvars
+!*.example.tfvars
+
+# Terraform CLI config / plan output
+.terraformrc
+terraform.rc
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---- Node (website) ----
+node_modules/

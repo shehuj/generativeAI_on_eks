@@ -9,6 +9,15 @@ from ray import serve
 app = FastAPI()
 
 
+def validate_prompt(prompt: str) -> None:
+    """Validate a generation prompt.
+
+    Raises AssertionError when the prompt is empty. Extracted as a pure helper
+    so the contract can be unit tested without loading the model.
+    """
+    assert len(prompt), "prompt parameter cannot be empty"
+
+
 @serve.deployment(num_replicas=1, route_prefix="/")
 @serve.ingress(app)
 class APIIngress:
@@ -21,7 +30,7 @@ class APIIngress:
         response_class=Response,
     )
     async def generate(self, prompt: str, img_size: int = 768):
-        assert len(prompt), "prompt parameter cannot be empty"
+        validate_prompt(prompt)
 
         image_ref = await self.handle.generate.remote(prompt, img_size=img_size)
         image = await image_ref
@@ -49,7 +58,7 @@ class StableDiffusionV2:
         self.pipe = self.pipe.to("cuda")
 
     def generate(self, prompt: str, img_size: int = 768):
-        assert len(prompt), "prompt parameter cannot be empty"
+        validate_prompt(prompt)
 
         image = self.pipe(prompt, height=img_size, width=img_size).images[0]
         return image
