@@ -331,26 +331,33 @@ jobs:
             --docker-username="$DOCKERHUB_USERNAME" \
             --docker-password="$DOCKERHUB_TOKEN" \
             --dry-run=client -o yaml | kubectl apply -f -
-      - name: Install kustomize
-        run: |
-          curl -sfLo /tmp/kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
-          tar -xzf /tmp/kustomize.tar.gz -C /usr/local/bin
-          kustomize version
-      - name: Bump image tag on the gitops branch
+      - name: Publish to the gitops branch
         if: needs.build-app.outputs.pushed == 'true'
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          TAG: ${{ needs.build-app.outputs.tag }}
         run: |
           set -euo pipefail
           # `main` is protected (PR + signed commits), so GitOps state lives on a
           # dedicated unprotected `gitops` branch that Argo CD tracks. Reset it to
-          # the current main commit, set the app image, and push.
+          # the current main commit and write a deterministic kustomization that
+          # pins the app image (no kustomize CLI — avoids partial/broken blocks).
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git switch -C gitops "$GITHUB_SHA"
-          cd "$GITOPS_DIR"
-          kustomize edit set image "${UPSTREAM_APP_IMAGE}=${{ needs.build-app.outputs.image }}"
-          cd - >/dev/null
+          cat > "$GITOPS_DIR/kustomization.yaml" <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - streamlit.yaml
+            - ray-service.yaml
+          images:
+            - name: ${UPSTREAM_APP_IMAGE}
+              newName: docker.io/${DH_USER}/dogbooth-app
+              newTag: ${TAG}
+          EOF
           git add "$GITOPS_DIR/kustomization.yaml"
-          git commit -m "deploy: dogbooth-app ${{ needs.build-app.outputs.tag }} [skip ci]"
+          git commit -m "deploy: dogbooth-app ${TAG} [skip ci]"
           git push -f origin gitops
       - name: Trigger Argo CD sync and wait for healthy
         run: |
