@@ -19,6 +19,7 @@ RUN . ${VIRTUAL_ENV}/bin/activate && \
 
 EXPOSE 8501
 
-COPY streamlit.py /home/appuser/
-COPY run.sh /home/appuser
-ENTRYPOINT ["./run.sh"]
+COPY --chown=appuser:appuser streamlit.py /home/appuser/
+COPY --chown=appuser:appuser run.sh /home/appuser/
+# Invoke via bash so it works regardless of the file's execute bit.
+ENTRYPOINT ["bash", "/home/appuser/run.sh"]
