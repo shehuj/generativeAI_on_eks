@@ -73,15 +73,30 @@ metadata:
   name: dogbooth-app
   namespace: dogbooth-app
   annotations:
-    # Serve Streamlit at the LB root so its assets (/static, /_stcore) and the
-    # websocket (/_stcore/stream) resolve in the browser. Long timeouts keep the
-    # Streamlit websocket alive.
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Internet-facing ALB, HTTPS via ACM, HTTP->HTTPS redirect. Served only on
+    # claudiq.com. Health check hits the Streamlit health endpoint.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:615299732970:certificate/11515b52-26b1-40aa-83c6-93f66864cec7
+    alb.ingress.kubernetes.io/healthcheck-path: /_stcore/health
+    alb.ingress.kubernetes.io/group.name: dogbooth
 spec:
-  ingressClassName: nginx
+  ingressClassName: alb
   rules:
-    - http:
+    - host: claudiq.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: streamlit-service
+                port:
+                  number: 8501
+    - host: www.claudiq.com
+      http:
         paths:
           - path: /
             pathType: Prefix
