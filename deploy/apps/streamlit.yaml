@@ -79,7 +79,9 @@ metadata:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
     alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:615299732970:certificate/11515b52-26b1-40aa-83c6-93f66864cec7
+    # No hardcoded certificate-arn: the ALB controller auto-discovers the ACM cert
+    # whose domain matches the Ingress host (claudiq.com). The cert is managed in
+    # Terraform (dns.tf); DNS records are managed by ExternalDNS.
     alb.ingress.kubernetes.io/healthcheck-path: /_stcore/health
     alb.ingress.kubernetes.io/group.name: dogbooth
 spec:

@@ -157,6 +157,24 @@ module "eks_blueprints_addons" {
   }
 
   #---------------------------------------
+  # ExternalDNS — auto-manage Route 53 records from Ingress hosts.
+  # IRSA is scoped to the app's hosted zone only.
+  #---------------------------------------
+  enable_external_dns            = true
+  external_dns_route53_zone_arns = [data.aws_route53_zone.app.arn]
+  external_dns = {
+    values = [<<-EOT
+      policy: upsert-only
+      txtOwnerId: ${local.name}
+      domainFilters:
+        - ${var.app_domain}
+      sources:
+        - ingress
+    EOT
+    ]
+  }
+
+  #---------------------------------------
   # Prommetheus and Grafana stack
   #---------------------------------------
   #---------------------------------------------------------------
