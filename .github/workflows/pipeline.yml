@@ -331,34 +331,10 @@ jobs:
             --docker-username="$DOCKERHUB_USERNAME" \
             --docker-password="$DOCKERHUB_TOKEN" \
             --dry-run=client -o yaml | kubectl apply -f -
-      - name: Publish to the gitops branch
-        if: needs.build-app.outputs.pushed == 'true'
-        env:
-          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          TAG: ${{ needs.build-app.outputs.tag }}
-        run: |
-          set -euo pipefail
-          # `main` is protected (PR + signed commits), so GitOps state lives on a
-          # dedicated unprotected `gitops` branch that Argo CD tracks. Reset it to
-          # the current main commit and write a deterministic kustomization that
-          # pins the app image (no kustomize CLI — avoids partial/broken blocks).
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git switch -C gitops "$GITHUB_SHA"
-          cat > "$GITOPS_DIR/kustomization.yaml" <<EOF
-          apiVersion: kustomize.config.k8s.io/v1beta1
-          kind: Kustomization
-          resources:
-            - streamlit.yaml
-            - ray-service.yaml
-          images:
-            - name: ${UPSTREAM_APP_IMAGE}
-              newName: docker.io/${DH_USER}/dogbooth-app
-              newTag: ${TAG}
-          EOF
-          git add "$GITOPS_DIR/kustomization.yaml"
-          git commit -m "deploy: dogbooth-app ${TAG} [skip ci]"
-          git push -f origin gitops
+      # Argo CD tracks `main` directly (deploy/apps). To roll out a new app image,
+      # bump deploy/apps/kustomization.yaml's newTag in a dev -> main PR; merging
+      # it makes Argo CD sync the new image. The pipeline builds/pushes the image
+      # (tagged with the commit SHA) so that tag exists to reference.
       - name: Trigger Argo CD sync and wait for healthy
         run: |
           set -euo pipefail

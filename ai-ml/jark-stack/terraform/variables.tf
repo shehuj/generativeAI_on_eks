@@ -69,9 +69,9 @@ variable "gitops_repo_url" {
 }
 
 variable "gitops_target_revision" {
-  description = "Git branch/tag Argo CD tracks (a dedicated, unprotected GitOps branch)"
+  description = "Git branch Argo CD tracks for app manifests"
   type        = string
-  default     = "gitops"
+  default     = "main"
 }
 
 variable "gitops_path" {
