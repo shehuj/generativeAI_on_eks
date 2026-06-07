@@ -1,0 +1,94 @@
+name: Cleanup (destroy all)
+
+# Strategic teardown of the entire JARK stack for cost optimisation — removes the
+# EKS cluster, node groups (incl. GPU), VPC/NAT, load balancers (nginx NLB + the
+# claudiq.com ALB), EBS, KMS, CloudWatch logs, Karpenter instances, and the app's
+# Route 53 records + ACM cert. Runs ai-ml/jark-stack/terraform/cleanup.sh.
+#
+# MANUAL ONLY, gated by the production environment, and requires typing the
+# confirmation phrase — this is destructive and irreversible.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm tearing everything down'
+        type: string
+        required: true
+      skip_terraform:
+        description: "Skip terraform destroy and only sweep AWS by tag (use if state is broken)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # AWS OIDC
+
+concurrency:
+  group: cleanup-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_DIR: ai-ml/jark-stack/terraform
+  TF_VERSION: "1.9.8"
+  AWS_REGION: "us-east-1" # overridden by the AWS_REGION secret in the load step
+
+jobs:
+  destroy:
+    name: Destroy all resources
+    runs-on: ubuntu-latest
+    environment: production # approval gate before any teardown
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm + preflight
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
+            echo "::error::Confirmation phrase mismatch — type 'destroy' to proceed."; exit 1
+          fi
+          [ -z "$AWS_ROLE_ARN" ] && { echo "::error::secrets.AWS_ROLE_ARN is required"; exit 1; }
+          echo "Confirmed. Proceeding with teardown."
+
+      - name: Load config from secrets
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_STATE_KEY: ${{ secrets.TF_STATE_KEY }}
+          TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+          TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          for v in AWS_REGION EKS_CLUSTER_NAME TF_STATE_BUCKET TF_STATE_KEY TF_STATE_REGION TF_LOCK_TABLE HUGGINGFACE_TOKEN; do
+            val="${!v}"; [ -n "$val" ] && echo "$v=$val" >> "$GITHUB_ENV"
+          done
+          grep -q '^AWS_REGION=' "$GITHUB_ENV" || echo "AWS_REGION=us-east-1" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
+      - name: Run strategic cleanup
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          CLUSTER_NAME: ${{ env.EKS_CLUSTER_NAME }}
+          REGION: ${{ env.AWS_REGION }}
+          # cleanup.sh reads these for the S3 backend, region, and TF vars.
+          TF_VAR_huggingface_token: ${{ env.HUGGINGFACE_TOKEN }}
+          TF_VAR_region: ${{ env.AWS_REGION }}
+        run: |
+          chmod +x cleanup.sh
+          ARGS="--yes"
+          [ "${{ github.event.inputs.skip_terraform }}" = "true" ] && ARGS="$ARGS --skip-terraform"
+          ./cleanup.sh $ARGS

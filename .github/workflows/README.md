@@ -68,10 +68,25 @@ Scans are **report-only** (results appear under the repo **Security** tab); flip
 Permissions used: `contents: write` (GitOps commit), `id-token: write` (OIDC),
 `security-events: write` (SARIF).
 
-## Teardown
+## Teardown / cost cleanup
 
-See `ai-ml/jark-stack/terraform/cleanup.sh` — it deletes the Argo CD Application
-first (so self-heal doesn't re-create the apps), then runs the strategic teardown.
+`cleanup.yml` — a **manual, gated** pipeline that destroys **everything** so the
+stack stops incurring cost. Run it from Actions → **Cleanup (destroy all)** →
+type `destroy` to confirm; it pauses at the `production` approval gate.
+
+It runs `ai-ml/jark-stack/terraform/cleanup.sh`, which:
+1. Deletes the Argo CD Application (stops self-heal) + app namespaces.
+2. Drains Karpenter (terminates GPU nodes) and every LoadBalancer Service so the
+   controllers release the **nginx NLB** and the **claudiq.com ALB**.
+3. `terraform destroy` in dependency order (EKS, node groups, VPC/NAT, KMS, addons).
+4. Tag-based AWS sweep for leftovers: ELBs, target groups, security groups, ENIs,
+   **EBS volumes**, the EKS KMS alias, CloudWatch log groups, Karpenter instances.
+5. Removes the app's **Route 53 records** (apex/www ALIAS, ACM validation,
+   ExternalDNS) and the **ACM certificate** — the hosted zone itself is kept.
+
+The S3 Terraform state bucket and the Route 53 hosted zone (your domain) are
+intentionally **not** deleted. Run locally instead with:
+`cd ai-ml/jark-stack/terraform && ./cleanup.sh` (flags: `--yes`, `--dry-run`, `--skip-terraform`).
 
 ## Notes / caveats
 

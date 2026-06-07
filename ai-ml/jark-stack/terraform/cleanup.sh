@@ -23,6 +23,7 @@ set -uo pipefail
 # --------------------------------------------------------------------------- #
 CLUSTER_NAME="${CLUSTER_NAME:-jark-stack}"
 REGION="${REGION:-us-east-1}"
+APP_DOMAIN="${APP_DOMAIN:-claudiq.com}"   # app records + ACM cert to remove (zone itself is kept)
 TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TF_DIR/../../.." && pwd)"
 
@@ -158,7 +159,21 @@ if [[ "$SKIP_TERRAFORM" == "true" ]]; then
   warn "--skip-terraform set; skipping terraform destroy (sweep only)"
 else
   pushd "$TF_DIR" >/dev/null
-  run terraform init -upgrade -input=false
+  # Init against the S3 remote state when configured (CI), else local state.
+  if [ -n "${TF_STATE_BUCKET:-}" ]; then
+    cat > backend_ci_override.tf <<'EOF'
+terraform {
+  backend "s3" {}
+}
+EOF
+    run terraform init -upgrade -input=false \
+      -backend-config="bucket=${TF_STATE_BUCKET}" \
+      -backend-config="key=${TF_STATE_KEY:-jark-stack/terraform.tfstate}" \
+      -backend-config="region=${TF_STATE_REGION:-$REGION}" \
+      ${TF_LOCK_TABLE:+-backend-config=dynamodb_table=$TF_LOCK_TABLE}
+  else
+    run terraform init -upgrade -input=false
+  fi
   for target in module.data_addons module.eks_blueprints_addons module.eks module.vpc; do
     log "destroying $target …"
     run terraform destroy -target="$target" -auto-approve -input=false
@@ -217,6 +232,29 @@ fi
 log "CloudWatch log groups…"
 for lg in $(aws_q logs describe-log-groups --log-group-name-prefix "/aws/eks/${CLUSTER_NAME}" --query 'logGroups[].logGroupName' --output text); do
   run aws logs delete-log-group --log-group-name "$lg"
+done
+
+log "Route 53 app records for ${APP_DOMAIN} (ALB aliases + ACM validation + ExternalDNS; the hosted zone is kept)…"
+ZID="$(aws_q route53 list-hosted-zones-by-name --dns-name "${APP_DOMAIN}." --query "HostedZones[?Name=='${APP_DOMAIN}.'].Id" --output text | sed 's#/hostedzone/##')"
+if [ -n "$ZID" ]; then
+  aws_q route53 list-resource-record-sets --hosted-zone-id "$ZID" --output json \
+    | jq -c '.ResourceRecordSets[]
+        | select(
+            (.Type=="A" and .AliasTarget!=null)
+            or (.Type=="CNAME" and (.Name|startswith("_")))
+            or (.Type=="TXT" and ((.ResourceRecords // [])|map(.Value)|join(" ")|test("external-dns")))
+          )' 2>/dev/null > /tmp/r53_app_records.jsonl || true
+  while read -r rr; do
+    [ -z "$rr" ] && continue
+    echo "    deleting $(echo "$rr" | jq -r '.Type+" "+.Name')"
+    jq -n --argjson r "$rr" '{Changes:[{Action:"DELETE",ResourceRecordSet:$r}]}' > /tmp/r53_del.json
+    run aws route53 change-resource-record-sets --hosted-zone-id "$ZID" --change-batch file:///tmp/r53_del.json
+  done < /tmp/r53_app_records.jsonl
+fi
+
+log "ACM certificate(s) for ${APP_DOMAIN} (deleted after the ALB is gone)…"
+for arn in $(aws_q acm list-certificates --region "$REGION" --query "CertificateSummaryList[?DomainName=='${APP_DOMAIN}'].CertificateArn" --output text); do
+  run aws acm delete-certificate --region "$REGION" --certificate-arn "$arn"
 done
 
 # --------------------------------------------------------------------------- #
